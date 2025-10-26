@@ -41,8 +41,10 @@ with st.sidebar:
 # ---------------------------
 # Data fetching
 # ---------------------------
-@st.cache_data(ttl=120, show_spinner=False)
-def fetch_prizepicks(url: str):
+# --------------------------------------------
+# Data fetching
+# --------------------------------------------
+# (old placeholder removed)
 # --------------------------------------------
 # Safe PrizePicks fetch (with cache + cooldown)
 # --------------------------------------------
