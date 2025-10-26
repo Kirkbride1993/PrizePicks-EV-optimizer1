@@ -1,168 +1,197 @@
 
-import os
-import io
+# main.py — PrizePicks EV Optimizer (Player Props feed)
+
 import time
 import json
-import math
 import requests
 import pandas as pd
 import streamlit as st
-from optimizer_core import compute_probabilities, best_lineups, lineup_rows
 
-st.set_page_config(page_title="PrizePicks EV Optimizer — Hands‑Off", layout="wide")
+st.set_page_config(page_title="PrizePicks EV Optimizer — Hands-Off", layout="wide")
+st.title("📈 PrizePicks EV Optimizer — Hands-Off")
+st.caption("Fully automated feed → de-vig → EV → best slips. Open and watch it update.")
 
-st.title("📈 PrizePicks EV Optimizer — Hands‑Off")
-st.caption("Fully automated feed → de‑vig → EV → best slips. Open and watch it update.")
-
+# ---------------------------
+# Sidebar controls
+# ---------------------------
 with st.sidebar:
     st.header("🔌 Data Feeds")
-    st.markdown("This app can run completely hands‑off using **TheOddsAPI**.")
-    # Secrets or env vars
-    default_key = st.secrets.get("THEODDS_API_KEY", os.getenv("THEODDS_API_KEY", ""))
-    api_key = st.text_input("TheOddsAPI Key", type="password", value=default_key)
-    sport_key = st.text_input("Sport key", value=st.secrets.get("THEODDS_SPORT_KEY", os.getenv("THEODDS_SPORT_KEY", "americanfootball_nfl")))
-    regions = st.text_input("Regions", value=st.secrets.get("THEODDS_REGIONS", os.getenv("THEODDS_REGIONS", "us")))
-    markets = st.text_area("Markets (comma‑sep)", value=st.secrets.get("THEODDS_MARKETS", os.getenv("THEODDS_MARKETS", "player_pass_tds,player_pass_yards,player_rush_yards,player_receiving_yards,receptions")))
-    refresh_sec = st.slider("Auto‑refresh (seconds)", 15, 300, 60)
+
+    # Optional: allow override via Secrets, but default to PrizePicks public feed.
+    default_url = "https://api.prizepicks.com/projections"
+    api_url = st.secrets.get("PP_API_URL", default_url)
+    api_url = st.text_input("API URL", value=api_url)
+
+    # Autorefresh seconds
+    refresh_sec = st.slider("Auto-refresh (seconds)", min_value=15, max_value=600, value=180, step=15)
+
+    # Filters
+    st.subheader("Filters")
+    league_filter = st.selectbox(
+        "League (optional filter)",
+        ["All", "NFL", "NBA", "MLB", "NHL", "WNBA", "CBB", "CFB", "SOC", "MMA", "Tennis"],
+        index=0,
+        help="Shows all by default. This is a soft filter against the feed's league labels."
+    )
+    text_filter = st.text_input("Search (player or stat)", "")
 
     st.markdown("---")
-    st.header("🧠 Optimizer")
-    top_k = st.slider("Search top K props", 10, 120, 60, step=5)
-    allow_same_game = st.checkbox("Allow same‑game combos", value=False)
-    st.markdown("---")
-    st.caption("Tip: Set secrets on Streamlit Cloud so you never enter keys on the page.")
+    st.write("Tip: Leave League = All for maximum coverage.")
 
-def theoddsapi_fetch_props(api_key: str, sport_key: str, regions: str, markets: str) -> pd.DataFrame:
-    """
-    Fetch props from TheOddsAPI v4 and aggregate per player+market+line:
-    - averages over/under prices across books
-    - returns required columns: player, market, line, over_odds, under_odds, team, game
-    """
-    if not api_key or not sport_key:
-        return pd.DataFrame()
-
-    base_url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
-    params = {
-        "regions": regions,
-        "markets": markets.replace(" ", ""),
-        "oddsFormat": "american",
-        "dateFormat": "iso",
-        "apiKey": api_key,
-    }
-    r = requests.get(base_url, params=params, timeout=20)
+# ---------------------------
+# Data fetching
+# ---------------------------
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_prizepicks(url: str):
+    r = requests.get(url, timeout=20)
     r.raise_for_status()
-    data = r.json()
+    return r.json()
+
+def to_safe_str(x):
+    if x is None:
+        return ""
+    return str(x)
+
+def parse_pp(json_obj: dict) -> pd.DataFrame:
+    """
+    PrizePicks returns:
+      - data: list of projections
+      - included: list with players, leagues, etc.
+
+    We defensively map:
+      - projection.attributes.stat_type or projection.attributes["projection_type"]["stat_type"]
+      - projection.attributes.line_score (float/str)
+      - player from relationships -> included
+      - league from included where type == "league" or from projection.attributes.league, if any
+    """
+    data = json_obj.get("data", [])
+    included = json_obj.get("included", [])
+
+    # Build quick lookups from "included"
+    players_by_id = {}
+    leagues_by_id = {}
+    teams_by_id = {}
+
+    for inc in included:
+        inc_type = inc.get("type")
+        inc_id = to_safe_str(inc.get("id"))
+        attrs = inc.get("attributes", {}) or {}
+
+        # PrizePicks sometimes uses "new_player", "players", or "player"
+        if inc_type in ("new_player", "players", "player"):
+            name = attrs.get("name") or attrs.get("full_name") or attrs.get("display_name")
+            players_by_id[inc_id] = name or ""
+        elif inc_type == "league":
+            leagues_by_id[inc_id] = attrs.get("name") or attrs.get("abbreviation") or ""
+        elif inc_type in ("team", "teams"):
+            teams_by_id[inc_id] = attrs.get("name") or attrs.get("abbreviation") or ""
 
     rows = []
-    for g in data:
-        home = g.get("home_team","")
-        away = g.get("away_team","")
-        game_name = f"{away} @ {home}" if home and away else (home or away)
-        bookmakers = g.get("bookmakers", [])
-        # map: (player, mk_key, point) -> dict of lists for over/under prices, plus team
-        bucket = {}
-        for bk in bookmakers:
-            for mk in bk.get("markets", []):
-                mk_key = mk.get("key")
-                # For player markets, outcomes list items may contain "name" (player + " Over"/" Under") or separate runner metadata.
-                for out in mk.get("outcomes", []):
-                    # Try to parse player name, side (Over/Under), and line (point)
-                    name = out.get("name","")
-                    price = out.get("price", None)
-                    point = out.get("point", None)
-                    description = out.get("description","")  # often player name
-                    team = out.get("team","")
-                    # Heuristics:
-                    # - If description exists, it's typically the player name.
-                    player = description or name.replace(" Over","").replace(" Under","")
-                    side = "over" if "Over" in name else ("under" if "Under" in name else None)
-                    if side is None and isinstance(price, (int,float)):
-                        # Sometimes outcomes are "Player Name" and separate outcome labels; skip if unclear
-                        if str(name).lower().endswith("over"): side="over"
-                        elif str(name).lower().endswith("under"): side="under"
-                    if not side or price is None or point is None or not player:
-                        continue
-                    key = (player.strip(), mk_key, float(point))
-                    if key not in bucket:
-                        bucket[key] = {"over": [], "under": [], "team": team, "game": game_name}
-                    bucket[key][side].append(price)
+    for item in data:
+        attrs = item.get("attributes", {}) or {}
+        rels = item.get("relationships", {}) or {}
 
-        for (player, mk_key, point), rec in bucket.items():
-            if not rec["over"] or not rec["under"]:
-                continue  # need both sides to devig
-            over_avg = sum(rec["over"]) / len(rec["over"])
-            under_avg = sum(rec["under"]) / len(rec["under"])
-            rows.append({
-                "player": player,
-                "team": rec["team"],
-                "market": mk_key,
-                "line": point,
-                "over_odds": int(round(over_avg)),
-                "under_odds": int(round(under_avg)),
-                "game": rec["game"],
-            })
+        # Stat / market
+        stat_type = attrs.get("stat_type") or attrs.get("projection_type") or attrs.get("type") or ""
+        # Some responses nest the stat label deeper; keep fallbacks:
+        if isinstance(stat_type, dict):
+            stat_type = stat_type.get("stat_type") or stat_type.get("name") or ""
+
+        # Line
+        line = attrs.get("line_score") or attrs.get("line") or attrs.get("value") or ""
+
+        # Link player via relationships
+        player_name = ""
+        player_rel = rels.get("new_player") or rels.get("player") or {}
+        player_data = player_rel.get("data") or {}
+        player_id = to_safe_str(player_data.get("id"))
+        if player_id and player_id in players_by_id:
+            player_name = players_by_id[player_id]
+
+        # League via relationships (if present)
+        league_name = ""
+        league_rel = rels.get("league") or {}
+        league_data = league_rel.get("data") or {}
+        league_id = to_safe_str(league_data.get("id"))
+        if league_id and league_id in leagues_by_id:
+            league_name = leagues_by_id[league_id]
+
+        # Team (best-effort; not always present)
+        team_name = ""
+        team_rel = rels.get("team") or {}
+        team_data = team_rel.get("data") or {}
+        team_id = to_safe_str(team_data.get("id"))
+        if team_id and team_id in teams_by_id:
+            team_name = teams_by_id[team_id]
+
+        # Fallbacks if not found in relationships
+        if not league_name:
+            league_name = attrs.get("league") or ""
+
+        rows.append({
+            "Player": player_name,
+            "League": league_name,
+            "Stat": to_safe_str(stat_type),
+            "Line": line,
+            "Team": team_name,
+        })
 
     df = pd.DataFrame(rows)
-    # Optional: normalize market naming
-    mk_map = {
-        "player_pass_tds": "PASS_TDS",
-        "player_pass_yards": "PASS_YDS",
-        "player_rush_yards": "RUSH_YDS",
-        "player_receiving_yards": "REC_YDS",
-        "receptions": "REC_RECS",
-    }
+    # Clean up/normalize
     if not df.empty:
-        df["market"] = df["market"].map(lambda k: mk_map.get(str(k), str(k).upper()))
+        df["League"] = df["League"].fillna("")
+        df["Stat"] = df["Stat"].fillna("").str.replace("_", " ").str.title()
+        # Simple normalization for common league labels
+        df["LeagueNorm"] = (
+            df["League"].str.upper()
+            .replace({
+                "NATIONAL FOOTBALL LEAGUE": "NFL",
+                "NATIONAL BASKETBALL ASSOCIATION": "NBA",
+                "MAJOR LEAGUE BASEBALL": "MLB",
+            })
+        )
     return df
 
-# Auto-refresh: rerun every refresh_sec by changing query params
-st.experimental_set_query_params(t=str(int(time.time()) // max(1, refresh_sec)))
-
-# Load live feed
-df_raw = None
-error = None
-try:
-    df_raw = theoddsapi_fetch_props(api_key, sport_key, regions, markets)
-except Exception as e:
-    error = str(e)
-
-st.markdown("### Live Data")
-if error:
-    st.error(f"Feed error: {error}")
-elif df_raw is None or df_raw.empty:
-    st.info("Waiting for live data. Confirm your API key, sport, regions, and markets.")
-else:
-    st.success(f"Loaded {len(df_raw)} props from TheOddsAPI")
-    st.dataframe(df_raw.head(50))
-
-if df_raw is not None and not df_raw.empty:
-    # compute probabilities & edges
+# ---------------------------
+# Load data (with graceful fallback)
+# ---------------------------
+placeholder = st.empty()
+with st.spinner("Loading PrizePicks player props..."):
     try:
-        df_proc = compute_probabilities(df_raw)
-        st.markdown("### Value Table (sorted by Power‑3 edge)")
-        st.dataframe(df_proc.sort_values("edge_vs_BE_power3", ascending=False).head(200))
-
-        # best lineups
-        results, df2 = best_lineups(df_proc, top_k=top_k, allow_same_game=allow_same_game)
-
-        st.markdown("## Best POWER lineups (EV on 1 unit)")
-        cols = st.columns(5)
-        for i, n in enumerate([2,3,4,5,6]):
-            r = results["power"][n]
-            with cols[i if i < len(cols) else -1]:
-                st.subheader(f"{n}-Pick")
-                st.metric("EV", f"{r['ev']:.3f}")
-                st.dataframe(lineup_rows(df2, r["combo_idxs"]))
-
-        st.markdown("## Best FLEX lineups (EV on 1 unit)")
-        cols2 = st.columns(4)
-        for i, n in enumerate([3,4,5,6]):
-            r = results["flex"][n]
-            with cols2[i if i < len(cols2) else -1]:
-                st.subheader(f"{n}-Pick")
-                st.metric("EV", f"{r['ev']:.3f}")
-                st.dataframe(lineup_rows(df2, r["combo_idxs"]))
-
-        st.caption("Assumes independence between legs. Disable same‑game for safety or request a correlation penalty build.")
+        raw = fetch_prizepicks(api_url)
+        df = parse_pp(raw)
+        ok = not df.empty
     except Exception as e:
-        st.error(f"Processing error: {e}")
+        ok = False
+        err = str(e)
+
+if not ok:
+    st.error("Could not parse player props. Showing a JSON preview so you can verify data is arriving.")
+    st.code(json.dumps(raw if 'raw' in locals() else {"error": err}, indent=2)[:5000])
+else:
+    # ---------------------------
+    # Apply filters
+    # ---------------------------
+    df_view = df.copy()
+
+    if league_filter != "All":
+        df_view = df_view[df_view["League"].str.upper().str.contains(league_filter.upper()) |
+                          df_view.get("LeagueNorm", pd.Series([""]*len(df_view))).str.contains(league_filter.upper())]
+
+    if text_filter.strip():
+        q = text_filter.strip().lower()
+        df_view = df_view[
+            df_view["Player"].str.lower().str.contains(q) |
+            df_view["Stat"].str.lower().str.contains(q) |
+            df_view["Team"].str.lower().str.contains(q)
+        ]
+
+    st.subheader("Live Data")
+    st.dataframe(df_view[["Player", "League", "Stat", "Line", "Team"]], use_container_width=True)
+
+# ---------------------------
+# Auto-refresh
+# ---------------------------
+st.caption("Live PrizePicks feed. This page auto-refreshes.")
+time.sleep(0.1)
+st.experimental_rerun() if refresh_sec == 0 else st.autorefresh(interval=refresh_sec * 1000, key="pp_refresh")
