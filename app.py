@@ -51,12 +51,26 @@ with st.sidebar:
 
 @st.cache_data(show_spinner=False)
 def fetch_prizepicks(url: str):
-    headers = {"User-Agent": "pp-ev-optimizer/1.0"}
-    r = requests.get(url, headers=headers, timeout=20)
-    if r.status_code == 429:
-        raise RuntimeError("RATE_LIMIT")
-    r.raise_for_status()
-    return r.json()
+    headers = {
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://prizepicks.com",
+    "Referer": "https://prizepicks.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    ),
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+
+r = requests.get(url, headers=headers, timeout=20)
+if r.status_code == 403:
+    raise RuntimeError("FORBIDDEN")
+if r.status_code == 429:
+    raise RuntimeError("RATE_LIMIT")
+r.raise_for_status()
+return r.json()
 
 def safe_fetch(url: str, min_gap_sec: int = 120):
     now = time.time()
