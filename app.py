@@ -25,7 +25,7 @@ with st.sidebar:
     # Autorefresh seconds
     refresh_sec = st.slider("Auto-refresh (seconds)", min_value=15, max_value=600, value=180, step=15)
 
-    # Filters
+    # Filters pop
     st.subheader("Filters")
     league_filter = st.selectbox(
         "League (optional filter)",
@@ -43,6 +43,37 @@ with st.sidebar:
 # ---------------------------
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_prizepicks(url: str):
+    # --------------------------------------------
+# Safe PrizePicks fetch (with cache + cooldown)
+# --------------------------------------------
+@st.cache_data(show_spinner=False)
+def fetch_prizepicks(url: str):
+    headers = {"User-Agent": "pp-ev-optimizer/1.0"}
+    r = requests.get(url, headers=headers, timeout=20)
+    if r.status_code == 429:
+        raise RuntimeError("RATE_LIMIT")
+    r.raise_for_status()
+    return r.json()
+
+def safe_fetch(url: str, min_gap_sec: int = 120):
+    now = time.time()
+    if "last_fetch_ts" not in st.session_state:
+        st.session_state["last_fetch_ts"] = 0
+    if "last_data" not in st.session_state:
+        st.session_state["last_data"] = None
+
+    if now - st.session_state["last_fetch_ts"] < min_gap_sec:
+        return st.session_state["last_data"]
+
+    try:
+        data = fetch_prizepicks(url)
+        st.session_state["last_fetch_ts"] = now
+        st.session_state["last_data"] = data
+        return data
+    except RuntimeError:  # RATE_LIMIT
+        st.warning("⚠️ Rate limit hit — pausing 2 minutes and reusing last good data.")
+        st.session_state["last_fetch_ts"] = now
+        return st.session_state["last_data"]
     r = requests.get(url, timeout=20)
     r.raise_for_status()
     return r.json()
