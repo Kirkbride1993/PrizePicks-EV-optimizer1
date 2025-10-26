@@ -43,7 +43,7 @@ with st.sidebar:
 # ---------------------------
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_prizepicks(url: str):
-    # --------------------------------------------
+# --------------------------------------------
 # Safe PrizePicks fetch (with cache + cooldown)
 # --------------------------------------------
 @st.cache_data(show_spinner=False)
