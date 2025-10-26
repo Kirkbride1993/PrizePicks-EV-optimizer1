@@ -194,4 +194,9 @@ else:
 # ---------------------------
 st.caption("Live PrizePicks feed. This page auto-refreshes.")
 time.sleep(0.1)
-st.experimental_rerun() if refresh_sec == 0 else st.autorefresh(interval=refresh_sec * 1000, key="pp_refresh")
+# Safer refresh (prevents crash on Streamlit Cloud)
+try:
+    st.autorefresh(interval=refresh_sec * 1000, key="pp_refresh")
+except Exception:
+    time.sleep(refresh_sec)
+    st.rerun()
