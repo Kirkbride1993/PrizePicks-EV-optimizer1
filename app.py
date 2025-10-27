@@ -50,27 +50,53 @@ with st.sidebar:
 # --------------------------------------------
 
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def fetch_prizepicks(url: str):
-    headers = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://prizepicks.com",
-    "Referer": "https://prizepicks.com/",
-    "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-    ),
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-}
+    # Use a session to grab cookies from the site, then call the API with browser headers.
+    s = requests.Session()
 
-    r = requests.get(url, headers=headers, timeout=20)
+    # 1) Warm-up request to set cookies
+    warm_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    s.get("https://www.prizepicks.com/", headers=warm_headers, timeout=20)
+
+    # 2) Actual API call with realistic browser headers + the cookies we just got
+    api_headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://www.prizepicks.com",
+        "Referer": "https://www.prizepicks.com/",
+        "User-Agent": warm_headers["User-Agent"],
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        # Extra fetch hints that some WAFs expect
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+    }
+
+    # Ensure we request a sensible page size
+    if "projections" in url and "per_page=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}per_page=250"
+
+    r = s.get(url, headers=api_headers, timeout=20)
     if r.status_code == 403:
         raise RuntimeError("FORBIDDEN")
     if r.status_code == 429:
         raise RuntimeError("RATE_LIMIT")
     r.raise_for_status()
     return r.json()
+
 
 def safe_fetch(url: str, min_gap_sec: int = 120):
     now = time.time()
