@@ -64,13 +64,13 @@ def fetch_prizepicks(url: str):
     "Pragma": "no-cache",
 }
 
-r = requests.get(url, headers=headers, timeout=20)
-if r.status_code == 403:
-    raise RuntimeError("FORBIDDEN")
-if r.status_code == 429:
-    raise RuntimeError("RATE_LIMIT")
-r.raise_for_status()
-return r.json()
+    r = requests.get(url, headers=headers, timeout=20)
+    if r.status_code == 403:
+        raise RuntimeError("FORBIDDEN")
+    if r.status_code == 429:
+        raise RuntimeError("RATE_LIMIT")
+    r.raise_for_status()
+    return r.json()
 
 def safe_fetch(url: str, min_gap_sec: int = 120):
     now = time.time()
