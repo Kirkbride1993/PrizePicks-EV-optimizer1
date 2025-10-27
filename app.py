@@ -51,7 +51,7 @@ with st.sidebar:
 
 @st.cache_data(show_spinner=False)
 def fetch_prizepicks(url: str):
-    # Relay-friendly fetch to bypass 403 from PrizePicks WAF on cloud hosts
+    # Fetch PrizePicks data with proxy support
     r = requests.get(url, timeout=45)
     if r.status_code == 429:
         raise RuntimeError("RATE_LIMIT")
@@ -59,12 +59,15 @@ def fetch_prizepicks(url: str):
         raise RuntimeError("FORBIDDEN")
     r.raise_for_status()
 
-    # Relay returns raw JSON text; parse to dict
-    text = r.text.strip()
-    if text.startswith("{") or text.startswith("["):
-        return json.loads(text)
-    return r.json()
-
+    try:
+        data = r.json()
+        # If response came through a proxy (like allorigins), unwrap it
+        if isinstance(data, dict) and "contents" in data:
+            import json
+            data = json.loads(data["contents"])
+        return data
+    except Exception as e:
+        raise RuntimeError(f"JSON parse error: {e}")
 
 def safe_fetch(url: str, min_gap_sec: int = 120):
     now = time.time()
