@@ -63,8 +63,8 @@ def fetch_prizepicks(url: str):
         data = r.json()
         # If response came through a proxy (like allorigins), unwrap it
         if isinstance(data, dict) and "contents" in data:
-            import json
-            data = json.loads(data["contents"])
+                import json
+                data = json.loads(data["contents"])
         return data
     except Exception as e:
         raise RuntimeError(f"JSON parse error: {e}")
