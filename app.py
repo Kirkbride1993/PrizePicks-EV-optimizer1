@@ -59,7 +59,7 @@ def fetch_prizepicks(url: str):
         raise RuntimeError("FORBIDDEN")
     r.raise_for_status()
 
-        try:
+     try:
         data = r.json()
         # If response came through a proxy (like allorigins), unwrap it
         if isinstance(data, dict) and "contents" in data:
