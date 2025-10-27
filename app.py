@@ -52,7 +52,7 @@ with st.sidebar:
 @st.cache_data(show_spinner=False)
 def fetch_prizepicks(url: str):
     # Relay-friendly fetch to bypass 403 from PrizePicks WAF on cloud hosts
-    r = requests.get(url, timeout=20)
+    r = requests.get(url, timeout=45)
     if r.status_code == 429:
         raise RuntimeError("RATE_LIMIT")
     if r.status_code == 403:
